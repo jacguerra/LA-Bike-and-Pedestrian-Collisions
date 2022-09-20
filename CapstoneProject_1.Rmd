@@ -1,0 +1,532 @@
+---
+title: "CapstoneProject_1"
+output: html_document
+---
+
+The following is a project focused on determining factors that result in pedestrian and bike deaths in Los Angeles. The data set was obtained from LADOT and includes all collision data from 2012 to 2018. The purpose of this project is to investigate why Vision Zero is struggling to decrease collision deaths in Los Angeles and determine any additional factors that should be taken into consideration.
+
+Load data and narrow down variables:
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyverse) 
+library(MASS)
+library(car)
+library(e1071)
+library(caret)
+library(caTools)
+library(cowplot)
+library(pROC)
+library(ggcorrplot)
+library(corrplot)
+library(forcats) 
+library(data.table)
+library(chron)
+library(stringr)
+
+setwd("C:/Users/jacqu/Desktop/R/Final Project Data Sets")
+collision=read.csv("Los_Angeles_Collisions_2012through2018.csv", na.strings =c("","-"))
+victims=read.csv("los_angeles_victims_2012through2018.csv",na.strings =c("","-"))
+
+dim(collision)
+dim(victims)
+
+#Remove variables that are unrelated to project (primary police information):
+collision=collision[,c(1:2,4:5,9,12,14,16,22:23,25:27,29,40:42,44:46,49:50,52:54,56:57,59:60,64)]
+
+#Rename longitude and latitude
+collision=setnames(collision, old = c('ï..X','Y'), new = c('longitude','latitude'))
+
+summary(collision)
+summary(victims)
+
+#Remove variables that are mostly empty or provide repetitive information
+collision=collision[,!names(collision) %in% c("pcf_code_of_viol","special_cond","population","primary_coll_factor")]
+
+#Merge with victim data set:
+victims=victims[,c(2,4:6)]
+collision_2=merge(victims,collision,by="case_id")
+
+#Remove case_id now that data sets are merged:
+collision_2=collision_2[,-1]
+
+#Export CSV to map in Tableau:
+collision_numkilled=filter(collision_2,number_killed>=1)
+
+collision_prevz=filter(collision_numkilled,accident_year<=2015)
+write.csv(collision_prevz,"C:/Users/jacqu/Desktop/R/collision_pre.csv")
+
+collision_postvz=filter(collision_numkilled,accident_year>=2016)
+write.csv(collision_postvz,"C:/Users/jacqu/Desktop/R/collision_post.csv")
+
+str(collision_2)
+```
+
+
+Data cleaning:
+```{r}
+
+#Convert NAs to N for Yes/No Factors that are missing a level: 
+collision_2$pedestrian_accident=fct_explicit_na(collision_2$pedestrian_accident, na_level = "N")
+collision_2$bicycle_accident=fct_explicit_na(collision_2$bicycle_accident, na_level = "N")
+collision_2$alcohol_involved=fct_explicit_na(collision_2$alcohol_involved, na_level = "N")
+
+#Convert values back to factors:
+collision_2$victim_role=as.factor(collision_2$victim_role)
+collision_2$day_of_week=as.factor(collision_2$day_of_week)
+collision_2$day_of_week=as.factor(collision_2$day_of_week)
+collision_2$primary_rd=as.character(collision_2$primary_rd)
+collision_2$secondary_rd=as.character(collision_2$secondary_rd)
+
+str(collision_2)
+
+collision_3=collision_2
+
+```
+
+
+Exploratory Data Analysis:
+```{r}
+
+#Visualizing NAs, victim_sex and road_cond_1 have the most 
+missing_data1 = collision_3 %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data1 = gather(missing_data1, key = "variables", value = "percent_missing")
+ggplot(missing_data1, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+
+#Determine if direction will be an important variable:
+collision_3 %>%
+  drop_na() %>%
+  ggplot(aes(x=direction, y=collision_severity, color=direction)) + geom_violin(trim=FALSE)
+
+#Remove direction:
+collision_3=collision_3[,!names(collision_3) %in% "direction"]
+
+
+#Looking at number of deaths by year
+collision_3 %>% 
+  group_by(accident_year) %>% 
+  summarise(number_killed = sum(number_killed)) %>%
+  ggplot(aes(x=accident_year,y=number_killed)) +geom_line(aes(y=number_killed)) + geom_text(aes(label=number_killed), size = 4, color="red")+xlab("Year") + ylab("Number of Victim Deaths") + ggtitle("Collision Victim Deaths in Los Angeles(2012-2018)")
+
+#Looking at collisions separated by victim type 
+collision_3 %>%
+  drop_na(victim_role) %>%
+  group_by(victim_role) %>%
+  summarise(number_killed=sum(number_killed)) %>%
+  ggplot(aes(x=victim_role,y=number_killed)) +geom_col()
+
+#Looking at pedestrian accidents as a percentage of total collisions - they only make up 8.3%
+collision_3 %>% 
+  group_by(pedestrian_accident) %>%
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(reorder(pedestrian_accident, -percent), percent), fill = pedestrian_accident)+
+  geom_col(fill = c("grey", "light blue"))+
+  geom_text(aes(label = sprintf("%.1f%%", percent)), hjust = 0.2, vjust = 2, size = 5)+ 
+  theme_bw()+  
+  xlab("Collisions") + ylab("Percent") + ggtitle("Pedestrian Accidents Percentage of Total Collisions")
+
+#Looking at bicycle accidents as a percentage of total collisions - they only make up 5.8%
+collision_3 %>% 
+  group_by(bicycle_accident) %>%
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(reorder(bicycle_accident, -percent), percent), fill = bicycle_accident)+
+  geom_col(fill = c("grey", "light blue"))+
+  geom_text(aes(label = sprintf("%.1f%%", percent)), hjust = 0.2, vjust = 2, size = 5)+ 
+  theme_bw()+  
+  xlab("Collisions") + ylab("Percent") + ggtitle("Bicycle Accidents Percentage of Total Collisions")
+
+#Looking at victim vehicle with number of victim deaths 
+deaths = subset(collision_3, collision_3$number_killed>0, select="victim_role")
+injuries=subset(collision_3,collision_3$number_injured>0, select="victim_role")
+
+#Look at percentage of traffic deaths 
+deaths %>%
+  drop_na(victim_role) %>%
+  group_by(victim_role) %>%
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(x=victim_role,y=percent, fill = victim_role))+
+  geom_col()+
+  geom_text(aes(label = sprintf("%.1f%%", percent)), hjust = 0.2, vjust = 2, size = 5)+ 
+  theme_bw()+ xlab("Victim Role") + ylab("Number of Victims Killed") + ggtitle("Number of Victims Killed by Victim Role")
+
+#Look at percentage of traffic injuries
+injuries %>%
+  drop_na(victim_role) %>%
+  ggplot(aes(victim_role)) + 
+          geom_bar(aes(y = (..count..)/sum(..count..),fill=victim_role)) + 
+          scale_y_continuous(labels=scales::percent) +
+          ylab("Percentage")+xlab("Victim Role") +ggtitle("Percentage of Collision Injuries by Victom Role") +geom_text(aes( label = scales::percent((..count..)/sum(..count..)),
+                   y= (..count..)/sum(..count..)), stat= "count", vjust = -.5)
+
+#Decided to focus on pedestrian and bicycle deaths only:
+collision_4=filter(collision_3,as.integer(victim_role)>2 & as.integer(victim_role)<5)
+
+#Remove variables that are specifically related to pedestrian/bike accidents as they are no longer useful with the data filtered:
+collision_4=collision_4[,!names(collision_4) %in% c("pedestrian_accident","bicycle_accident","victim_role","type_of_collision")]
+
+str(collision_4)
+summary(collision_4)
+
+#Look at numerical values:
+
+#Victim Age
+collision_4 %>% 
+  group_by(victim_age) %>%
+  ggplot(aes(victim_age)) + geom_bar(aes(y=(..count..)))+  
+  xlab("Victim Age") + ylab("Count")
+
+#Categorize 998 as NA and and 231:
+collision_4$victim_age=gsub("998","NA",collision_4$victim_age)
+collision_4$victim_age=gsub("231","NA",collision_4$victim_age)
+collision_4$victim_age=gsub("119","NA",collision_4$victim_age)
+collision_4$victim_age=as.numeric(collision_4$victim_age)
+
+#Remove NA values from data set, they only make up 5%:
+collision_4=na.omit(collision_4)
+
+#Victim Age:
+collision_4 %>% 
+  group_by(victim_age) %>%
+  ggplot(aes(victim_age)) + geom_bar(aes(y=(..count..)))+   geom_vline(xintercept=mean(collision_4$victim_age), color="red") +
+  xlab("Victim Age") + ylab("Count")
+
+summary(collision_4$victim_age)
+
+#Accident Year - number of accidents stays fairly steady from 2012 to 2018
+collision_4 %>% 
+  group_by(accident_year) %>%
+  ggplot(aes(accident_year)) + geom_bar(aes(y=(..count..)))+  
+  xlab("Accident Year") + ylab("Count")
+
+#Collision time - collision counts seem to be highest around 3pm-8pm, possibly because that is when there is a high volume of vehicles on the road at that time.
+collision_4 %>% 
+  group_by(collision_time) %>%
+  ggplot(aes(collision_time)) + geom_bar(aes(y=(..count..)))+  
+  xlab("Collision Time") + ylab("Count")
+
+#Only look at the hour of timing and convert to factor to limit variation:
+collision_4$collision_time= sprintf("%04d", collision_4$collision_time)
+collision_4$collision_time=str_sub(collision_4$collision_time, end=-3)
+collision_4$collision_time=as.factor(collision_4$collision_time)
+
+str(collision_4)
+
+#Now that collision time is grouped, the times with the most collisions seem to correspond with rush hour traffic - 7-9am and 5-6pm
+collision_4 %>% 
+  group_by(collision_time) %>%
+  ggplot(aes(collision_time)) + geom_bar(aes(y=(..count..)))+  
+  xlab("Collision Time") + ylab("Count")
+
+
+```
+
+Clean out factors:
+```{r}
+#Chart factors to see if I can combine levels:
+
+table(collision_4$collision_severity)
+table(collision_4$weather_1)
+table(collision_4$pcf_viol_category)
+table(collision_4$road_cond_1)
+table(collision_4$road_surface)
+table(collision_4$control_device)
+table(collision_4$lighting)
+table(collision_4$ped_action)
+table(collision_4$state_hwy_ind)
+table(collision_4$hit_and_run)
+table(collision_4$alcohol_involved)
+table(collision_4$lighting)
+table(collision_4$intersection)
+
+#Weather:
+collision_4 %>% 
+  group_by(weather_1) %>%
+  ggplot(aes(weather_1)) + geom_bar(aes(y=(..count..))) +
+  xlab("Weather") + ylab("Count")
+
+#PCF Violation Category:
+collision_4 %>% 
+  group_by(pcf_viol_category) %>%
+  ggplot(aes(pcf_viol_category)) + geom_bar(aes(y=(..count..))) +
+  xlab("PCF Violation Category") + ylab("Count")
+
+#Pedestrian Accident:
+collision_4 %>% 
+  group_by(ped_action) %>%
+  ggplot(aes(ped_action)) + geom_bar(aes(y=(..count..))) +
+  xlab("Pedestrian Accident") + ylab("Count")
+
+#State Highway Index:
+collision_4 %>% 
+  group_by(state_hwy_ind) %>%
+  ggplot(aes(state_hwy_ind)) + geom_bar(aes(y=(..count..))) +
+  xlab("State Highway Index") + ylab("Count")
+
+#Hit and Run:
+collision_4 %>% 
+  group_by(hit_and_run) %>%
+  ggplot(aes(hit_and_run)) + geom_bar(aes(y=(..count..))) +
+  xlab("Hit and Run") + ylab("Count")
+
+#Control Device:
+collision_4 %>% 
+  group_by(control_device) %>%
+  ggplot(aes(control_device)) + geom_bar(aes(y=(..count..))) +
+  xlab("Control Device") + ylab("Count")
+
+#Lighting:
+collision_4 %>% 
+  group_by(lighting) %>%
+  ggplot(aes(lighting)) + geom_bar(aes(y=(..count..))) +
+  xlab("Lighting") + ylab("Count")
+
+#Road Surface:
+collision_4 %>% 
+  group_by(road_surface) %>%
+  ggplot(aes(road_surface)) + geom_bar(aes(y=(..count..))) +
+  xlab("Road Surface") + ylab("Count")
+
+#Road Condition:
+collision_4 %>% 
+  group_by(road_cond_1) %>%
+  ggplot(aes(road_cond_1)) + geom_bar(aes(y=(..count..))) +
+  xlab("Road Condition") + ylab("Count")
+
+
+#Combine levels
+collision_4$weather_1[collision_4$weather_1=="D"] = "F"
+collision_4$weather_1[collision_4$weather_1=="E"] = "F"
+collision_4$weather_1[collision_4$weather_1=="G"] = "F"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="13"] = "17"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="14"] = "16"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="15"] = "16"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="- "] = "00"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="2"] = "17"
+collision_4$ped_action[collision_4$ped_action=="G"] = "E"
+collision_4$hit_and_run[collision_4$hit_and_run=="M"] = "F"
+collision_4$control_device[collision_4$control_device=="B"] = "D"
+collision_4$control_device[collision_4$control_device=="C"] = "D"
+collision_4$lighting[collision_4$lighting=="E"] = "D"
+collision_4$road_surface[collision_4$road_surface=="C"] = "B"
+collision_4$road_surface[collision_4$road_surface=="D"] = "B"
+collision_4$road_surface=droplevels(collision_4$road_surface)
+collision_4$weather_1=droplevels(collision_4$weather_1)
+collision_4$pcf_viol_category=droplevels(collision_4$pcf_viol_category)
+collision_4$ped_action=droplevels(collision_4$ped_action)
+collision_4$hit_and_run=droplevels(collision_4$hit_and_run)
+collision_4$control_device=droplevels(collision_4$control_device)
+collision_4$lighting=droplevels(collision_4$lighting)
+
+#Check to see if they look any better:
+#Weather:
+collision_4 %>% 
+  group_by(weather_1) %>%
+  ggplot(aes(weather_1)) + geom_bar(aes(y=(..count..))) +
+  xlab("Weather") + ylab("Count")
+
+#PCF Violation Category:
+collision_4 %>% 
+  group_by(pcf_viol_category) %>%
+  ggplot(aes(pcf_viol_category)) + geom_bar(aes(y=(..count..))) +
+  xlab("PCF Violation Category") + ylab("Count")
+
+#Pedestrian Action:
+collision_4 %>% 
+  group_by(ped_action) %>%
+  ggplot(aes(ped_action)) + geom_bar(aes(y=(..count..))) +
+  xlab("Pedestrian Action") + ylab("Count")
+
+#Hit and Run:
+collision_4 %>% 
+  group_by(hit_and_run) %>%
+  ggplot(aes(hit_and_run)) + geom_bar(aes(y=(..count..))) +
+  xlab("Hit and Run") + ylab("Count")
+
+#Control Device:
+collision_4 %>% 
+  group_by(control_device) %>%
+  ggplot(aes(control_device)) + geom_bar(aes(y=(..count..))) +
+  xlab("Control Device") + ylab("Count")
+
+#Lighting:
+collision_4 %>% 
+  group_by(lighting) %>%
+  ggplot(aes(lighting)) + geom_bar(aes(y=(..count..))) +
+  xlab("Lighting") + ylab("Count")
+
+#Road Surface:
+collision_4 %>% 
+  group_by(road_surface) %>%
+  ggplot(aes(road_surface)) + geom_bar(aes(y=(..count..))) +
+  xlab("Road Surface") + ylab("Count")
+
+
+#Combine further:
+collision_4$weather_1[collision_4$weather_1=="C"] = "B"
+collision_4$weather_1[collision_4$weather_1=="F"] = "B"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="02"] = "17"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="16"] = "17"
+collision_4$pcf_viol_category[collision_4$pcf_viol_category=="04"] = "22"
+collision_4$ped_action[collision_4$ped_action=="C"] = "B"
+collision_4$weather_1=droplevels(collision_4$weather_1)
+collision_4$pcf_viol_category=droplevels(collision_4$pcf_viol_category)
+collision_4$ped_action=droplevels(collision_4$ped_action)
+
+#Check to see if they look any better:
+#Weather:
+collision_4 %>% 
+  group_by(weather_1) %>%
+  ggplot(aes(weather_1)) + geom_bar(aes(y=(..count..))) +
+  xlab("Weather") + ylab("Count")
+
+#PCF Violation Category:
+collision_4 %>% 
+  group_by(pcf_viol_category) %>%
+  ggplot(aes(pcf_viol_category)) + geom_bar(aes(y=(..count..))) +
+  xlab("PCF Violation Category") + ylab("Count")
+
+#Pedestrian Accident:
+collision_4 %>% 
+  group_by(ped_action) %>%
+  ggplot(aes(ped_action)) + geom_bar(aes(y=(..count..))) +
+  xlab("Pedestrian Action") + ylab("Count")
+
+#Decided to remove state highway indicator and road conditions because the factors were too one sided to fix:
+collision_4=collision_4[,!names(collision_4) %in% c("state_hwy_ind","road_cond_1")]
+
+summary(collision_4)
+str(collision_4)
+collision_4=na.omit(collision_4)
+
+```
+
+
+
+Look at categorical variables:
+```{r}
+
+#Gender:
+collision_4 %>%
+  ggplot(aes(x=victim_sex, y=collision_severity, fill=victim_sex)) + geom_violin()
+
+#Day of the week:
+collision_4 %>%
+  ggplot(aes(x=day_of_week, y=collision_severity,fill=day_of_week)) + geom_violin()
+
+#Saturday and Sunday have a lower number of collisions that week days:
+collision_4 %>% 
+  group_by(day_of_week) %>%
+  ggplot(aes(day_of_week)) + geom_bar(aes(y=(..count..)))+  
+  xlab("Day of Week") + ylab("Count")
+  
+#Intersection;
+collision_4 %>%
+  ggplot(aes(x=intersection, y=collision_severity,fill=intersection)) + geom_violin()
+
+#Weather:
+collision_4 %>%
+  ggplot(aes(x=weather_1, y=collision_severity,fill=weather_1)) + geom_violin()
+
+#PCF violation category 
+collision_4 %>%
+  ggplot(aes(x=pcf_viol_category, y=collision_severity,fill=pcf_viol_category)) + geom_violin()
+
+#Hit and run
+collision_4 %>%
+  ggplot(aes(x=hit_and_run, y=collision_severity,fill=hit_and_run)) + geom_violin()
+
+#Ped action
+collision_4 %>%
+  ggplot(aes(x=ped_action, y=collision_severity,fill=ped_action)) + geom_violin()
+
+#Alcohol Involved
+collision_4 %>%
+  ggplot(aes(x=alcohol_involved, y=collision_severity,fill=alcohol_involved)) + geom_violin()
+
+```
+
+
+
+
+Ordered Logistic Regression:
+
+After running the stepwise AIC, accident year, weather, and control device were removed. The results of the ordered logistic regression reveal that male victims are significantly more likely to sustain a higher level of injury/death when they are hit. Additionally, younger victims are more likely to have a higher level of injury or death when hit. One possible reason is that men are probably more likely than women to be walking at night given safety concerns for women, and other variables reveal that nightime and darkness in general results in more deadly crashes.
+
+Additionally, after grouping age and converting it into a factor, the middle age groups (13-62 years) are significantly less likely to die in a collision. The older age group, 63+, although not significant, is more likely to have a higher degree of injury/death. It can also be assumed that the youngest age group, which is in the intercept, has a negative correlation given that age was very signficantly negatively correlated when it was not grouped. This means the youngest age group is the most vulnerable population.
+
+Although not significant (except for 5am), the only time of day that is negatively correlated with collision severity (indicating a higher likelihood of death) are from 2 to 5am. This would likely be the darkest time of night, making it difficult to see pedestrians/bikers, and since roads are largely empty at this time it is likely that cars could be going at faster speeds at this time, making death more likely for the victim. The afternoon, when daylight is strongest, is the safest time of day to walk/bike, specifically 10am-2pm. Since lighting is stronger, drivers could have a chance to slow down before hitting a pedestrian/biker, resulting in less injury.
+
+Sunday is signficantly more likely to results in death/high injury. This seems unlikely given that Saturday and Sunday had a lower number of collisions overall, and that by common sense Saturday seems more likely of a day for fatalities given that people tend to drink on Saturdays, and alcohol is also signfiicantly more likely to result in death. However, given that 2-5am is the most dangerous time to be walking/biking, I think it is likely that this time on Sunday is when most deadly crashes happen, after people have been drinking Saturday night.
+
+Walking in an intersection results in less injurious/deadly collisions, which makes sense given they are the safest place for pedestrians to cross.
+
+The Primary collision factors that are most significantly linked to a higher degree of injury/death are speeding, driving/biking under the influence of drugs/alcohol, pedestrian violation, not obeying traffic signs, and unsafe lane change.
+
+One interesting result is that a collision that is not a hit and run is more likely to result in death/serious injury. This is not what I would have expected, but perhaps people are more likely to stop when they think they have severely injured/killed the person because they need more help, and decide to run when they think it is less serious.
+
+The pedestrian actions that are most deadly are crossing not in the crosswalk and when pedestrians are not in the road. One possible reasons pedestrians who are hit while they're not in the road results in deadlier collisions is that if a car hits you on the sidewalk it indicates very reckless driving, and perhaps they are going faster/the collisions involves multiple cars. Additionally, if you are hit while not in the road it is more likely you will also hit a building/something on the sidewalk which would result in higher injury.
+
+When the road surface is not dry (slick, icy, wet) pedestrians/bikers have a lower degree of injury. This could possibly be because cars have to go slower in those conditions. Additionally, there also just likely less walkers/bikers when the weather is bad.
+
+When it is dark and there are no street lights is the most dangerous place for pedestrians/bikers, but darkness with street lights is still worse than dusk/daylight.
+
+Finally, when alcohol is involved collisions are more deadly as well. This could be because and of the party drinking could result in more reckless behavior.
+
+I also took a look at the relative risk ratio. Since the scale of collision severity goes down, I chose the variables that were least likely to make collision severity move up a prediction class i.e. the lowest percentages. Driving/biking under the influence was the lowest (30% more likely), followed by unsafe lane change (56%), pedestrian violation (57%), unsafe speed (59%), crossing not in the crosswalk (62%), not obeying traffic signs (65%), and improper passing (66%). These results suggest that the most important aspects of determining if a collision will be deadly are the actions of the driver AND the pedestrian. While time of day, lighting, and road surfacing are also all signficant variables, the most important thing to focus on is changing the behaviors of drivers and pedestrians (and bikers too, although there was no specific variables to describe their behavior).
+
+
+```{r}
+#Remove character variables, location, and number killed/injured which will give the same informtion as collision severity.
+collision_5=collision_4[,!names(collision_4) %in% c("primary_rd","secondary_rd","number_killed","number_injured","longitude","latitude")]
+
+str(collision_5)
+collision_5$collision_severity=as.factor(collision_5$collision_severity)
+
+#Run Ordered Logistic:
+order1 = polr(collision_severity~., data = collision_5, Hess=TRUE)
+summary(order1) #AIC=68874
+exp(coef(order1))
+
+#Run stepwise AIC to see if any variables should be removed
+stepAIC(order1, direction="both")
+
+#Remove accident year, weather, and control device:
+order2=polr(collision_severity ~ victim_sex + victim_age + 
+    collision_time + day_of_week + intersection + pcf_viol_category + 
+    hit_and_run + ped_action + road_surface + lighting + alcohol_involved, 
+    data = collision_5, Hess = TRUE)
+summary(order2) #AIC 68869
+exp(coef(order2))
+
+#Group age into factor - divided based on the age distribution of collisions:
+collision_5$victim_age=ifelse(collision_5$victim_age<12,"1",ifelse(collision_5$victim_age<37,"2",ifelse(collision_5$victim_age<63,"3","4")))
+collision_5$victim_age=as.factor(collision_5$victim_age)
+str(collision_5)
+
+#The regression with age grouped as a factor has the lowest AIC
+order3=polr(collision_severity ~ victim_sex + victim_age + 
+    collision_time + day_of_week + intersection + pcf_viol_category + 
+    hit_and_run + ped_action + road_surface + lighting + alcohol_involved, 
+    data = collision_5, Hess = TRUE)
+summary(order3) #AIC 68674
+
+
+```
+
+Conclusions:
+Vision Zero should continue to focus on trying to get cars to slow down, as speed is an important factor in determining pedestrian/biker deaths. They should also work on installing more lights since the darkest times are the most deadly, and dark with no lights is the most dangerous lighting state. However, even with lights, darkness is still more dangerous than daytime/dusk.
+
+Although there is not much to be done about nightime being more dangerous as it will always be harder to see pedestrians/bikers at night, perhaps having more police/emergergency workers available at night could at least mean that collisions will be responded to more quickly. Specifically Saturday night/early Sunday morning should have a lot of coverage.
+
+Since young people are the most vulnerable population, Vision Zero should focus efforts on areas where there are a lot of young people, like schools, universities, playgrounds, etc.
+
+The results indicate that while the driver action is obviouosly important, pedestrian actions are important too. Not crossing in the crosswalk and pedestrian violation were both significantly more likely to result in death/serious injury. One possible solution is increasing the number of crosswalks, especially in areas where there is a long distance between intersections, so that pedestrians are less likely to cross dangerously. Another option is trying to decrease jay walking, perhaps by given out more jaywalking tickets so pedestrians are less likely to cross without a cross walk.
+
+Alcohol is also an extremely important predictor of whether an accident will be deadly. Vision Zero should also focus efforts on reducing drunk driving, perhaps by increasing DUI checkpoints.
